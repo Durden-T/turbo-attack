@@ -11,53 +11,117 @@ package routine
 import (
 	"errors"
 	"net"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mytechnotalent/turbo-attack/packet"
 )
 
-// IP4 takes an ip and port and sends a random TCP4 packet with random flags.
-// It returns an error if one occurred.
-func IP4(ethInterface *string, ip4Byte *[]byte, portByte *[]byte) error {
-	fd, _ := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, syscall.ETH_P_ALL)
-	nic, err := net.InterfaceByName(*ethInterface)
+// Socket holds a reusable socket for sending packets
+type Socket struct {
+	fd       int
+	addr     unix.SockaddrLinklayer
+	isClosed bool
+}
+
+// NewSocket creates a new reusable socket for the given interface
+func NewSocket(ethInterface string) (*Socket, error) {
+	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, unix.ETH_P_ALL)
 	if err != nil {
-		return errors.New("interface does not exist")
+		return nil, errors.New("failed to create socket: " + err.Error())
 	}
+
+	nic, err := net.InterfaceByName(ethInterface)
+	if err != nil {
+		unix.Close(fd)
+		return nil, errors.New("interface does not exist")
+	}
+
 	var hardwareAddr [8]byte
 	copy(hardwareAddr[0:7], nic.HardwareAddr[0:7])
-	addr := syscall.SockaddrLinklayer{
-		Protocol: syscall.ETH_P_IP,
+	addr := unix.SockaddrLinklayer{
+		Protocol: unix.ETH_P_IP,
 		Ifindex:  nic.Index,
 		Halen:    uint8(len(nic.HardwareAddr)),
 		Addr:     hardwareAddr,
 	}
-	_ = syscall.Bind(fd, &addr)
-	packet, err := packet.TCP4(74, *ip4Byte, *portByte)
-	_, _ = syscall.Write(fd, packet)
-	syscall.Close(fd)
+
+	if err := unix.Bind(fd, &addr); err != nil {
+		unix.Close(fd)
+		return nil, errors.New("failed to bind socket: " + err.Error())
+	}
+
+	return &Socket{
+		fd:       fd,
+		addr:     addr,
+		isClosed: false,
+	}, nil
+}
+
+// Close closes the socket
+func (s *Socket) Close() error {
+	if s.isClosed {
+		return nil
+	}
+	s.isClosed = true
+	return unix.Close(s.fd)
+}
+
+// SendIP4Packet sends an IPv4 packet
+func (s *Socket) SendIP4Packet(ip4Byte, portByte []byte) error {
+	if s.isClosed {
+		return errors.New("socket is closed")
+	}
+
+	packet, err := packet.TCP4(74, ip4Byte, portByte)
+	if err != nil {
+		return errors.New("failed to create packet: " + err.Error())
+	}
+
+	_, err = unix.Write(s.fd, packet)
+	if err != nil {
+		return errors.New("failed to send packet: " + err.Error())
+	}
+
 	return nil
 }
 
-// IP6 takes an ip and port and sends a random TCP6 packet with random flags.
-// It returns an error if one occurred.
-func IP6(ethInterface *string, ip6Byte *[]byte, portByte *[]byte) error {
-	fd, _ := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, syscall.ETH_P_ALL)
-	nic, err := net.InterfaceByName(*ethInterface)
+// SendIP6Packet sends an IPv6 packet
+func (s *Socket) SendIP6Packet(ip6Byte, portByte []byte) error {
+	if s.isClosed {
+		return errors.New("socket is closed")
+	}
+
+	packet, err := packet.TCP6(74, ip6Byte, portByte)
 	if err != nil {
-		return errors.New("interface does not exist")
+		return errors.New("failed to create packet: " + err.Error())
 	}
-	var hardwareAddr [8]byte
-	copy(hardwareAddr[0:7], nic.HardwareAddr[0:7])
-	addr := syscall.SockaddrLinklayer{
-		Protocol: syscall.ETH_P_IP,
-		Ifindex:  nic.Index,
-		Halen:    uint8(len(nic.HardwareAddr)),
-		Addr:     hardwareAddr,
+
+	_, err = unix.Write(s.fd, packet)
+	if err != nil {
+		return errors.New("failed to send packet: " + err.Error())
 	}
-	_ = syscall.Bind(fd, &addr)
-	packet, err := packet.TCP6(74, *ip6Byte, *portByte)
-	_, _ = syscall.Write(fd, packet)
-	syscall.Close(fd)
+
 	return nil
+}
+
+// For backward compatibility
+func IP4(ethInterface *string, ip4Byte *[]byte, portByte *[]byte) error {
+	socket, err := NewSocket(*ethInterface)
+	if err != nil {
+		return err
+	}
+	defer socket.Close()
+
+	return socket.SendIP4Packet(*ip4Byte, *portByte)
+}
+
+func IP6(ethInterface *string, ip6Byte *[]byte, portByte *[]byte) error {
+	socket, err := NewSocket(*ethInterface)
+	if err != nil {
+		return err
+	}
+	defer socket.Close()
+
+	return socket.SendIP6Packet(*ip6Byte, *portByte)
 }
